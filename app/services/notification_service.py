@@ -1,38 +1,44 @@
+import asyncio
 import httpx
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from core.config import PROVIDER_URL, API_KEY
 from core.logging_config import logger
 from db.session import db
 
-# --- Cliente HTTP Asíncrono ---
+provider_semaphore = asyncio.Semaphore(100)
+
 client = httpx.AsyncClient(
-    timeout=10.0,
-    headers={"X-API-Key": API_KEY}
+    timeout=httpx.Timeout(10.0, connect=3.0),
+    headers={"X-API-Key": API_KEY},
+    limits=httpx.Limits(
+        max_connections=500,
+        max_keepalive_connections=100
+    )
 )
 
-# --- Lógica de Negocio y Resiliencia ---
 @retry(
     stop=stop_after_attempt(3),
-    wait=wait_exponential(multiplier=1, min=2, max=10),
+    wait=wait_exponential(multiplier=1, min=1, max=5),
     retry=retry_if_exception_type((httpx.HTTPStatusError, httpx.RequestError)),
     reraise=True
 )
 async def send_to_provider(payload: dict):
     """
-    Envía la notificación al proveedor con lógica de reintentos para 429 y 500.
+    Envía la notificación al proveedor con control de concurrencia y reintentos.
     """
-    response = await client.post(PROVIDER_URL, json=payload)
-    
-    # Manejo específico de errores del provider (Rate limit 429 o Server Error 500)
-    if response.status_code == 429:
-        logger.warning("Rate limit alcanzado en el provider. Reintentando...")
+    async with provider_semaphore:
+        response = await client.post(PROVIDER_URL, json=payload)
+
+        # Manejo específico de errores del provider (Rate limit 429 o Server Error 500)
+        if response.status_code == 429:
+            logger.warning("Rate limit alcanzado en el provider. Reintentando...")
+            response.raise_for_status()
+        elif response.status_code >= 500:
+            logger.error(f"Error en el provider: {response.text}. Reintentando...")
+            response.raise_for_status()
+        
         response.raise_for_status()
-    elif response.status_code >= 500:
-        logger.error(f"Error en el provider: {response.text}. Reintentando...")
-        response.raise_for_status()
-    
-    response.raise_for_status()
-    return response.json()
+        return response.json()
 
 async def process_notification_task(request_id: str):
     """

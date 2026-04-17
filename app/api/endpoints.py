@@ -1,5 +1,6 @@
 import uuid
-from fastapi import APIRouter, BackgroundTasks, HTTPException, status
+import asyncio
+from fastapi import APIRouter, HTTPException, status
 from models.schemas import NotificationRequest, NotificationStatusResponse
 from db.session import db
 from services.notification_service import process_notification_task
@@ -17,15 +18,15 @@ async def create_request(notification: NotificationRequest):
     logger.info(f"Solicitud creada: {request_id}")
     return {"id": request_id}
 
-@router.post("/requests/{id}/process")
-async def process_request(id: str, background_tasks: BackgroundTasks):
+@router.post("/requests/{id}/process", status_code=status.HTTP_202_ACCEPTED)
+async def process_request(id: str):
     if id not in db:
         raise HTTPException(status_code=404, detail="Request not found")
 
     if db[id]["status"] in ["processing", "sent"]:
         return {"id": id, "status": db[id]["status"]}
 
-    background_tasks.add_task(process_notification_task, id)
+    asyncio.create_task(process_notification_task(id))
     return {"id": id, "status": "queued"}
 
 @router.get("/requests/{id}", response_model=NotificationStatusResponse)
